@@ -885,6 +885,41 @@ pictureSettings.onState(function (event) {
   pictureState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
 });
 
+function NotificationGroup(handlers) {
+  var self = this;
+  this.handlers = handlers || {};
+  this.subscription = new LunaSubscription(
+    'com.webos.notification/getAlertNotification',
+    { subscribe: true },
+    'com.webos.surfacemanager',
+    {
+      message: function (response) {
+        if (self.handlers.alert) self.handlers.alert(response);
+      },
+      error: function (err, line) {
+        if (self.handlers.error) self.handlers.error(err, line);
+      },
+      close: function (code, signal) {
+        if (self.handlers.close) self.handlers.close(code, signal);
+      }
+    }
+  );
+}
+
+NotificationGroup.prototype.start = function () {
+  this.subscription.start();
+  return this;
+};
+
+NotificationGroup.prototype.stop = function () {
+  this.subscription.stop();
+  return this;
+};
+
+var energySavingNotification = new NotificationGroup({
+  alert: function (alert) { handleEnergySavingAlert(alert); }
+});
+
 /*
  * Cache for luna reads whose answers do not change between dashboard ticks.
  * Every luna() call is a fork+exec, and collectStats made ten of them per
@@ -3261,6 +3296,31 @@ var ENERGY_SAVING_VALUES = ['auto', 'off', 'min', 'med', 'max', 'screen_off'];
 // getSystemSettingValues on a B8. "strong" is the strongest, not an on/off.
 var LOGO_DIMMING_VALUES = ['off', 'light', 'strong'];
 
+function energySavingAlertMatches(alert) {
+  var source = alert && (alert.sourceId || alert.source || alert.alertSourceId);
+  var params = alert && (alert.launchParams || alert.launchParameters || alert.params);
+  var text;
+  if (source !== 'com.webos.service.tvservice.noti') return false;
+  if (!alert || (alert.alertAction !== 'open') || (alert.modal !== true && alert.modal !== 'true')) return false;
+  if (typeof params === 'string') {
+    text = params;
+  } else {
+    try { text = JSON.stringify(params || {}); } catch (e) { return false; }
+  }
+  return /category\s*["']?\s*[:=]\s*["']?picture/i.test(text) &&
+         /(?:key|settingKey)\s*["']?\s*[:=]\s*["']?energySaving/i.test(text);
+}
+
+function handleEnergySavingAlert(alert) {
+  if (!energySavingAlertMatches(alert)) return;
+  console.log('notification: approving energy-saving confirmation popup');
+  luna('com.webos.service.networkinput/test/sendKeyCode', { keyCode: 28 }, function (response) {
+    if (!response || !response.returnValue) {
+      console.error('notification: could not approve energy-saving popup');
+    }
+  });
+}
+
 function doControl(action, value, cb) {
   if (!CONFIG.allowControl) return cb({ ok: false, error: 'controls disabled in config' });
 
@@ -4503,6 +4563,7 @@ function setupHomeAssistant() {
     publishPictureValue(event.key, event.value);
   });
   pictureSettings.start();
+  energySavingNotification.start();
 
   /*
    * Entities published under a different component than they are now. Home
