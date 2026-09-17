@@ -27,6 +27,7 @@ var oled = require('./lib/oled');
 var screensavers = require('./lib/screensavers');
 var telemetry = require('./lib/telemetry');
 var stateModule = require('./lib/state');
+var mqttStateModule = require('./lib/mqtt-state');
 var lunaTransport = require('./lib/luna');
 var luna = lunaTransport.call;
 var zeroBuffer = MiniMQTT.zeroBuffer;
@@ -1351,6 +1352,13 @@ function setupHomeAssistant() {
   MQTT_STATUS.tls = useTls;
   mqttStatus('connecting', '');
 
+  var stateMqtt = mqttStateModule.init({
+    client: mqttClient,
+    prefix: pfx,
+    legacyScreenTopic: stateScreenTopic
+  });
+  stateMqtt.attach(liveState.state);
+
   function publishDiscovery() {
     ha.clearRetired(function (topic, payload, retain) {
       mqttClient.publish(topic, payload, retain);
@@ -1433,17 +1441,6 @@ function setupHomeAssistant() {
       mqttClient.publish(telemetryTopic, JSON.stringify(s), false);
       MQTT_STATUS.lastPublish = Date.now();
       /*
-       * Reconcile the panel switch against what the TV actually reports.
-       * It used to be published only when the command arrived over MQTT, so
-       * blanking the panel from the dashboard, the remote, or the TV's own
-       * menus left Home Assistant asserting the opposite indefinitely.
-       * Driving it from powerState makes it self-correcting whatever the
-       * change came from.
-       */
-      if (s.powerState && typeof s.powerState.screenOn === 'boolean') {
-        mqttClient.publish(stateScreenTopic, s.powerState.screenOn ? 'ON' : 'OFF', true);
-      }
-      /*
        * The picture modes a set will accept change with the source's dynamic
        * range, and a select whose options cannot be applied is worse than no
        * select - Home Assistant would offer SDR modes against Dolby Vision
@@ -1480,9 +1477,9 @@ function setupHomeAssistant() {
     console.log('mqtt: connected to ' + CONFIG.mqtt.host + ':' + mqttClient.opts.port +
                 (useTls ? ' (tls)' : ' (plaintext)'));
     mqttClient.publish(statusTopic, 'online', true);
-    // Deliberately not asserting a screen state here: publishTelemetry below
-    // sets it from what the TV reports. Publishing a retained 'ON' on every
-    // reconnect meant a restart silently flipped Home Assistant back to on.
+    // Republish the in-memory state because broker retention is not assumed.
+    stateMqtt.publishSnapshot();
+    // Do not assert a guessed screen state before the TV reports one.
     // Resolve the panel type first: publishDiscovery filters on it, and on a
     // first connect it would otherwise still be undetermined.
     // The app select's options come from listApps, which on a first connect
@@ -1506,11 +1503,7 @@ function setupHomeAssistant() {
 
     if (action === 'screen') {
       var turnOff = (val.toUpperCase() === 'OFF');
-      doControl(turnOff ? 'screenOff' : 'screenOn', null, function(r) {
-        if (r && r.ok) {
-          mqttClient.publish(stateScreenTopic, turnOff ? 'OFF' : 'ON', true);
-        }
-      });
+      doControl(turnOff ? 'screenOff' : 'screenOn', null, function() {});
       return;
     }
 
