@@ -936,8 +936,65 @@ PowerStateGroup.prototype._message = function (response) {
   this.snapshotPending = false;
 };
 
+function applicationStateValues(appId) {
+  var full = String(appId || '');
+  var short = full.replace('com.webos.app.', '');
+  var name = inputNameMap[short] || short;
+  return {
+    app_id: full,
+    app: short,
+    display_title: (name && name !== short) ? name + ' (' + short.toUpperCase() + ')' : short
+  };
+}
+
+function ApplicationStateGroup() {
+  var self = this;
+  this.listeners = [];
+  this.snapshotPending = true;
+  this.subscription = new LunaSubscription(
+    'com.webos.applicationManager/getForegroundAppInfo',
+    { subscribe: true },
+    null,
+    {
+      message: function (response) { self._message(response); },
+      close: function () { self.snapshotPending = true; }
+    }
+  );
+}
+
+ApplicationStateGroup.prototype.onState = function (listener) {
+  if (typeof listener === 'function') this.listeners.push(listener);
+  return this;
+};
+
+ApplicationStateGroup.prototype.start = function () {
+  this.subscription.start();
+  return this;
+};
+
+ApplicationStateGroup.prototype._message = function (response) {
+  var values, key, event, i;
+  if (!response || response.returnValue === false || !response.appId) return;
+  clearLunaServiceCache('com.webos.applicationManager/getForegroundAppInfo');
+  values = applicationStateValues(response.appId);
+  for (key in values) {
+    event = {
+      group: 'application',
+      key: key,
+      value: values[key],
+      snapshot: this.snapshotPending,
+      sourceTime: Date.now()
+    };
+    for (i = 0; i < this.listeners.length; i++) {
+      try { this.listeners[i](event); } catch (e) {}
+    }
+  }
+  this.snapshotPending = false;
+};
+
 var pictureState = new StateManager();
 var powerState = new StateManager();
+var applicationState = new StateManager();
 var pictureSettings = new PictureSettingsGroup();
 pictureSettings.onState(function (event) {
   pictureState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
@@ -945,6 +1002,10 @@ pictureSettings.onState(function (event) {
 var powerStateGroup = new PowerStateGroup();
 powerStateGroup.onState(function (event) {
   powerState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
+});
+var applicationStateGroup = new ApplicationStateGroup();
+applicationStateGroup.onState(function (event) {
+  applicationState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
 });
 
 function NotificationGroup(handlers) {
@@ -1007,6 +1068,13 @@ function lunaCached(uri, payload, ttlMs, cb) {
 
 function clearLunaCache() { lunaCache = {}; }
 
+function clearLunaServiceCache(uri) {
+  var key, prefix = uri + '|';
+  for (key in lunaCache) {
+    if (key.indexOf(prefix) === 0) delete lunaCache[key];
+  }
+}
+
 function clearLunaPictureCache() {
   var key, separator, payload;
   for (key in lunaCache) {
@@ -1024,6 +1092,13 @@ function clearLunaPictureCache() {
  * for changes made by the remote or the TV menus. Use raw values so this path
  * has the same values as the picture settings subscription.
  */
+function reconcileApplicationState(stats) {
+  var app = stats && stats.app_id ? applicationStateValues(stats.app_id) : null;
+  var key;
+  if (!app) return;
+  for (key in app) applicationState.update('application', key, app[key], true, stats.time);
+}
+
 function reconcilePowerState(stats) {
   var power = stats && stats.powerState;
   var mapped;
@@ -1878,6 +1953,7 @@ function collectStats(cb) {
 
   function flushStats(result) {
     clearTimeout(safetyTimeout);
+    reconcileApplicationState(result);
     reconcilePowerState(result);
     reconcilePictureState(result);
     lastStats = result;
@@ -4639,6 +4715,16 @@ function setupHomeAssistant() {
     }
   }
 
+  function publishApplicationValue(key, value) {
+    if (typeof value === 'undefined' || value === null) return;
+    mqttClient.publish(pfx + '/state/application/' + key, String(value), true);
+  }
+
+  function publishApplicationSnapshot() {
+    var app = applicationState.snapshot().application || {};
+    for (var key in app) publishApplicationValue(key, app[key]);
+  }
+
   pictureState.onChange(function (event) {
     publishPictureValue(event.key, event.value);
   });
@@ -4647,8 +4733,12 @@ function setupHomeAssistant() {
       mqttClient.publish(stateScreenTopic, event.value ? 'ON' : 'OFF', true);
     }
   });
+  applicationState.onChange(function (event) {
+    publishApplicationValue(event.key, event.value);
+  });
   pictureSettings.start();
   powerStateGroup.start();
+  applicationStateGroup.start();
   energySavingNotification.start();
 
   /*
@@ -5773,6 +5863,7 @@ function setupHomeAssistant() {
     mqttClient.publish(statusTopic, 'online', true);
     publishPictureSnapshot();
     publishPowerSnapshot();
+    publishApplicationSnapshot();
     // Deliberately not asserting a screen state here: publishTelemetry below
     // sets it from what the TV reports. Publishing a retained 'ON' on every
     // reconnect meant a restart silently flipped Home Assistant back to on.
