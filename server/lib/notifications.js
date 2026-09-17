@@ -7,7 +7,9 @@ var luna = require('./luna');
 
 function matchesEnergySaving(alert) {
   var info = alert && (alert.alertInfo || alert);
-  var params = info && (info.launchParams || info.launchParameters || info.params);
+  var action = info && (info.onCloseAction || info.onFailAction || info.action);
+  var params = info && (info.launchParams || info.launchParameters || info.params ||
+                        (action && (action.launchParams || action.launchParameters || action.params)));
   var text;
   if (!info || info.sourceId !== 'com.webos.service.tvservice.noti') return false;
   if (alert.alertAction !== 'open' || (info.modal !== true && info.modal !== 'true')) return false;
