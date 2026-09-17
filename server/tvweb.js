@@ -20,6 +20,7 @@ var tls = require('tls');
 var child_process = require('child_process');
 var path = require('path');
 var execFile = child_process.execFile;
+var spawn = child_process.spawn;
 var zlib = require('zlib');
 
 /*
@@ -677,6 +678,214 @@ function luna(uri, payload, cb, appId) {
 }
 
 /*
+ * A long-lived luna-send subscription. luna-send emits one JSON response per
+ * line in interactive mode. Keep this transport separate from luna(): the
+ * one-shot call has a finite timeout, while a subscription must survive until
+ * it is deliberately stopped and must be restarted after a bus/process exit.
+ */
+function LunaSubscription(uri, payload, appId, handlers) {
+  this.uri = uri;
+  this.payload = payload || {};
+  this.appId = appId;
+  this.handlers = handlers || {};
+  this.child = null;
+  this.buffer = '';
+  this.stopped = true;
+  this.retryTimer = null;
+  this.retryMs = 1000;
+}
+
+LunaSubscription.prototype.start = function () {
+  if (!this.stopped) return;
+  this.stopped = false;
+  this.retryMs = 1000;
+  this._connect();
+};
+
+LunaSubscription.prototype.stop = function () {
+  this.stopped = true;
+  if (this.retryTimer) {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+  if (this.child) {
+    this.child.kill();
+    this.child = null;
+  }
+  this.buffer = '';
+};
+
+LunaSubscription.prototype._connect = function () {
+  var self = this;
+  if (self.stopped || self.child) return;
+
+  var args = self.appId ? ['-a', self.appId] : [];
+  // Do not use -f here: formatted responses span several lines, while the
+  // subscription stream is deliberately parsed as one compact JSON response
+  // per line.
+  args = args.concat(['-i', 'luna://' + self.uri, JSON.stringify(self.payload)]);
+  self.buffer = '';
+  self.child = spawn('/usr/bin/luna-send', args);
+
+  self.child.stdout.on('data', function (chunk) {
+    self._consume(String(chunk));
+  });
+  self.child.stderr.on('data', function (chunk) {
+    if (self.handlers.error) self.handlers.error(String(chunk));
+  });
+  self.child.on('error', function (err) {
+    if (self.handlers.error) self.handlers.error(err);
+  });
+  self.child.on('close', function (code, signal) {
+    self.child = null;
+    if (self.stopped) return;
+    if (self.handlers.close) self.handlers.close(code, signal);
+    self.retryTimer = setTimeout(function () {
+      self.retryTimer = null;
+      self._connect();
+    }, self.retryMs);
+    self.retryMs = Math.min(self.retryMs * 2, 30000);
+  });
+};
+
+LunaSubscription.prototype._consume = function (chunk) {
+  var lines, i, line, parsed;
+  this.buffer += chunk;
+  lines = this.buffer.split(/\r?\n/);
+  this.buffer = lines.pop();
+  for (i = 0; i < lines.length; i++) {
+    line = lines[i].replace(/^\s+|\s+$/g, '');
+    if (!line) continue;
+    try {
+      parsed = JSON.parse(line);
+      if (this.handlers.message) this.handlers.message(parsed);
+    } catch (e) {
+      if (this.handlers.error) this.handlers.error(e, line);
+    }
+  }
+};
+
+/*
+ * The settings service returns a map even when several keys are subscribed.
+ * Keep the transport grouped into one process, but expose one event per key so
+ * later state consumers do not need to know the Luna response shape.
+ */
+var PICTURE_SETTING_KEYS = [
+  'backlight', 'pictureMode', 'energySaving', 'screenShift', 'logoLuminanceAdjust'
+];
+
+function PictureSettingsGroup(handlers) {
+  var self = this;
+  this.handlers = handlers || {};
+  this.listeners = [];
+  this.snapshotPending = true;
+  this.subscription = new LunaSubscription(
+    'com.webos.service.settings/getSystemSettings',
+    { category: 'picture', keys: PICTURE_SETTING_KEYS, subscribe: true },
+    null,
+    {
+      message: function (response) { self._message(response); },
+      error: function (err, line) {
+        if (self.handlers.error) self.handlers.error(err, line);
+      },
+      close: function (code, signal) {
+        self.snapshotPending = true;
+        if (self.handlers.close) self.handlers.close(code, signal);
+      }
+    }
+  );
+}
+
+PictureSettingsGroup.prototype.onState = function (listener) {
+  if (typeof listener === 'function') this.listeners.push(listener);
+  return this;
+};
+
+PictureSettingsGroup.prototype.start = function () {
+  this.subscription.start();
+  return this;
+};
+
+PictureSettingsGroup.prototype.stop = function () {
+  this.subscription.stop();
+  return this;
+};
+
+PictureSettingsGroup.prototype._message = function (response) {
+  var settings, key, event, i, l;
+  if (!response || response.returnValue === false || !response.settings) return;
+  clearLunaPictureCache();
+  settings = response.settings;
+  for (i = 0; i < PICTURE_SETTING_KEYS.length; i++) {
+    key = PICTURE_SETTING_KEYS[i];
+    if (typeof settings[key] === 'undefined') continue;
+    event = {
+      group: 'picture',
+      key: key,
+      value: settings[key],
+      snapshot: this.snapshotPending,
+      sourceTime: Date.now()
+    };
+    for (l = 0; l < this.listeners.length; l++) {
+      try { this.listeners[l](event); } catch (e) {}
+    }
+  }
+  this.snapshotPending = false;
+};
+
+/*
+ * Latest-value state only. There is deliberately no history or offline queue:
+ * the MQTT layer can publish this snapshot after reconnect.
+ */
+function StateManager() {
+  this.values = {};
+  this.times = {};
+  this.listeners = [];
+}
+
+StateManager.prototype.onChange = function (listener) {
+  if (typeof listener === 'function') this.listeners.push(listener);
+  return this;
+};
+
+StateManager.prototype.update = function (group, key, value, snapshot, sourceTime) {
+  var groupValues = this.values[group] || (this.values[group] = {});
+  var groupTimes = this.times[group] || (this.times[group] = {});
+  var changed = !Object.prototype.hasOwnProperty.call(groupValues, key) || groupValues[key] !== value;
+  var event, i;
+  sourceTime = typeof sourceTime === 'number' ? sourceTime : Date.now();
+  if (typeof groupTimes[key] === 'number' && sourceTime < groupTimes[key]) return false;
+  groupTimes[key] = sourceTime;
+  if (!changed) return false;
+  groupValues[key] = value;
+  event = { group: group, key: key, value: value, snapshot: !!snapshot, sourceTime: sourceTime };
+  for (i = 0; i < this.listeners.length; i++) {
+    try { this.listeners[i](event); } catch (e) {}
+  }
+  return true;
+};
+
+StateManager.prototype.get = function (group, key) {
+  var groupValues = this.values[group];
+  return groupValues && Object.prototype.hasOwnProperty.call(groupValues, key) ? groupValues[key] : undefined;
+};
+
+StateManager.prototype.snapshot = function () {
+  var result = {}, group, key;
+  for (group in this.values) {
+    result[group] = {};
+    for (key in this.values[group]) result[group][key] = this.values[group][key];
+  }
+  return result;
+};
+
+var pictureState = new StateManager();
+var pictureSettings = new PictureSettingsGroup();
+pictureSettings.onState(function (event) {
+  pictureState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
+});
+
+/*
  * Cache for luna reads whose answers do not change between dashboard ticks.
  * Every luna() call is a fork+exec, and collectStats made ten of them per
  * collection at a 2s tick - roughly five forks a second with the dashboard
@@ -700,6 +909,43 @@ function lunaCached(uri, payload, ttlMs, cb) {
 }
 
 function clearLunaCache() { lunaCache = {}; }
+
+function clearLunaPictureCache() {
+  var key, separator, payload;
+  for (key in lunaCache) {
+    if (key.indexOf('com.webos.service.settings/getSystemSettings|') !== 0) continue;
+    separator = key.indexOf('|');
+    try {
+      payload = JSON.parse(key.slice(separator + 1));
+      if (payload.category === 'picture') delete lunaCache[key];
+    } catch (e) {}
+  }
+}
+
+/*
+ * Telemetry is the reconciliation path for missed subscription messages and
+ * for changes made by the remote or the TV menus. Use raw values so this path
+ * has the same values as the picture settings subscription.
+ */
+function reconcilePictureState(stats) {
+  var picture = stats && stats.picture;
+  if (!picture) return;
+  if (typeof picture.mode_raw !== 'undefined') {
+    pictureState.update('picture', 'pictureMode', picture.mode_raw, true, stats.time);
+  }
+  if (typeof picture.backlight !== 'undefined' && picture.backlight !== null) {
+    pictureState.update('picture', 'backlight', picture.backlight, true, stats.time);
+  }
+  if (typeof picture.energySaving !== 'undefined') {
+    pictureState.update('picture', 'energySaving', picture.energySaving, true, stats.time);
+  }
+  if (typeof picture.screenShift !== 'undefined') {
+    pictureState.update('picture', 'screenShift', picture.screenShift, true, stats.time);
+  }
+  if (typeof picture.logoLuminanceAdjust !== 'undefined') {
+    pictureState.update('picture', 'logoLuminanceAdjust', picture.logoLuminanceAdjust, true, stats.time);
+  }
+}
 
 /*
  * Platform code to the processor it always means. LG reports the code either
@@ -1525,6 +1771,7 @@ function collectStats(cb) {
 
   function flushStats(result) {
     clearTimeout(safetyTimeout);
+    reconcilePictureState(result);
     lastStats = result;
     lastStatsTime = Date.now();
     isCollecting = false;
@@ -4235,6 +4482,28 @@ function setupHomeAssistant() {
   MQTT_STATUS.tls = useTls;
   mqttStatus('connecting', '');
 
+  function pictureStateTopic(key) {
+    return pfx + '/state/picture/' + key;
+  }
+
+  function publishPictureValue(key, value) {
+    if (typeof value === 'undefined' || value === null) return;
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+      value = JSON.stringify(value);
+    }
+    mqttClient.publish(pictureStateTopic(key), String(value), true);
+  }
+
+  function publishPictureSnapshot() {
+    var picture = pictureState.snapshot().picture || {};
+    for (var key in picture) publishPictureValue(key, picture[key]);
+  }
+
+  pictureState.onChange(function (event) {
+    publishPictureValue(event.key, event.value);
+  });
+  pictureSettings.start();
+
   /*
    * Entities published under a different component than they are now. Home
    * Assistant keys a discovered entity on its config topic, so a sensor that
@@ -5355,6 +5624,7 @@ function setupHomeAssistant() {
     console.log('mqtt: connected to ' + CONFIG.mqtt.host + ':' + mqttClient.opts.port +
                 (useTls ? ' (tls)' : ' (plaintext)'));
     mqttClient.publish(statusTopic, 'online', true);
+    publishPictureSnapshot();
     // Deliberately not asserting a screen state here: publishTelemetry below
     // sets it from what the TV reports. Publishing a retained 'ON' on every
     // reconnect meant a restart silently flipped Home Assistant back to on.
