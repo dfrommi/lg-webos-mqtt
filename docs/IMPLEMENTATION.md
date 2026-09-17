@@ -165,6 +165,52 @@ becomes the remote shell's own `argv`:
 `rsync` ships with the Homebrew Channel but is broken on-device: it cannot load
 `libcrypto.so.1.1`. Use `scp`, which works over the sftp subsystem.
 
+## Upgrading in place
+
+Five things decide how `tvwebctl update` works.
+
+**The HTTP client is probed, not assumed.** Node 0.12's `https` has no CA bundle
+worth trusting, so the download goes through curl or wget. The stock
+`/usr/bin/curl` reaches GitHub on both sets tested — 7.53.1 against OpenSSL
+1.0.2p on webOS 4.4.3, 7.82.0 against OpenSSL 3.0.9 on webOS 9.2.2 — but that is
+not something to assume of other firmware, and a client the owner installed can
+be anywhere. Installed clients are tried before the stock one, each against the
+real release endpoint until one returns usable JSON. A client that does that has
+proved everything that matters. Certificate verification is never disabled: what
+comes back runs as root on the next restart.
+
+**The directory is updated in place, not swapped.** `/var/lib/tvweb` holds more
+than code — `config.json`, `adblock_hosts`, the staged screen saver the boot hook
+bind-mounts, `services_stopped` — and a wholesale swap has to carry every one of
+them across or silently lose it. Replacing only the files the release ships
+cannot lose state it never touches.
+
+**Every file is renamed into place, never written over.** Busybox ash reads a
+script as it executes, so overwriting `tvwebctl` corrupts the watchdog loop
+already running out of it. A rename leaves that process on the old inode.
+
+**The tarball is inflated by node, not by tar.** `zlib` is certainly present and
+busybox's gzip support is not, and an inflate failure is how a truncated download
+is caught — cheaper than trusting a content length. The unpacked `tvweb.js` then
+has to declare the version that was asked for before anything is replaced.
+
+**A client that cannot answer is not the same as a request that is refused.**
+Treating every non-zero exit as "try the next client" reported a 404 from a
+repository with no releases as `no HTTP client on this TV could reach GitHub -
+install a current curl`, which would send someone off installing software they
+already have. Both clients name the status on stderr (`server returned error:
+HTTP/1.1 404`, `ERROR 404:`, `returned error: 404`) and both keep an exit code
+for it — curl 22, wget 8 — so an HTTP answer of any kind ends the probe: the
+transport has proved itself and only the request is wrong. The 403 wording stays
+hedged, since a proxy or a captive portal returns that as readily as a spent
+rate limit.
+
+The upgrade runs in the server itself, with `tvwebctl update` invoking
+`node tvweb.js --update` as a one-shot. One implementation serves the dashboard,
+Home Assistant and the shell, and the shell path still works with the dashboard
+switched off or the server not running. `--update` exits 3 when there is nothing
+newer, which `tvwebctl` reads as "no restart needed" rather than as a failure.
+
 ## Fonts
 
 The dashboard bundles [Outfit](https://github.com/Outfitio/Outfit-Fonts) and
