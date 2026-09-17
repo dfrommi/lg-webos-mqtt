@@ -26,6 +26,8 @@ var privacy = require('./lib/privacy');
 var oled = require('./lib/oled');
 var screensavers = require('./lib/screensavers');
 var telemetry = require('./lib/telemetry');
+var lunaTransport = require('./lib/luna');
+var luna = lunaTransport.call;
 var zeroBuffer = MiniMQTT.zeroBuffer;
 
 /*
@@ -226,28 +228,9 @@ function num(v, dflt) {
   var n = parseInt(v, 10);
   return isNaN(n) ? dflt : n;
 }
-
 var TOAST_SOURCE = 'com.webos.app.home';
 
-/* luna-send wrapper via execFile directly, avoiding /bin/sh and shell child leaks.
- * -w 2000 tells luna-send itself to time out after 2 seconds.
- * timeout: 3500 ensures Node kills the child process if it ever stalls.
- * appId, where given, becomes -a: a few services check the caller's registered
- * bus identity rather than anything in the payload, and reject everyone else
- * with "Unknown Source".
- */
-function luna(uri, payload, cb, appId) {
-  var args = appId ? ['-a', appId] : [];
-  args = args.concat(['-n', '1', '-w', '2000', '-f', 'luna://' + uri, JSON.stringify(payload || {})]);
-  execFile('/usr/bin/luna-send', args, { timeout: 3500 }, function (err, stdout) {
-    var parsed = null;
-    if (!err && stdout) {
-      try { parsed = JSON.parse(stdout); } catch (e) {}
-    }
-    if (cb) cb(parsed, String(stdout || ''));
-  });
-}
-
+/*
 /*
  * Cache for luna reads whose answers do not change between dashboard ticks.
  * Every luna() call is a fork+exec, and telemetry made ten of them per
