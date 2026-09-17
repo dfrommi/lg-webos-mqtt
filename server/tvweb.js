@@ -992,9 +992,65 @@ ApplicationStateGroup.prototype._message = function (response) {
   this.snapshotPending = false;
 };
 
+function audioStateValues(response) {
+  var scenario = response && response.scenario ? String(response.scenario).replace(/^mastervolume_/, '') : null;
+  return {
+    volume: response && typeof response.volume !== 'undefined' ? response.volume : null,
+    muted: response && typeof response.muted !== 'undefined' ? !!response.muted : null,
+    output: scenario ? formatSoundOutput(scenario) : null
+  };
+}
+
+function AudioStateGroup() {
+  var self = this;
+  this.listeners = [];
+  this.snapshotPending = true;
+  this.subscription = new LunaSubscription(
+    'com.webos.audio/getVolume',
+    { subscribe: true },
+    null,
+    {
+      message: function (response) { self._message(response); },
+      close: function () { self.snapshotPending = true; }
+    }
+  );
+}
+
+AudioStateGroup.prototype.onState = function (listener) {
+  if (typeof listener === 'function') this.listeners.push(listener);
+  return this;
+};
+
+AudioStateGroup.prototype.start = function () {
+  this.subscription.start();
+  return this;
+};
+
+AudioStateGroup.prototype._message = function (response) {
+  var values, key, event, i;
+  if (!response || response.returnValue === false) return;
+  clearLunaServiceCache('com.webos.audio/getSoundOut');
+  values = audioStateValues(response);
+  for (key in values) {
+    if (values[key] === null) continue;
+    event = {
+      group: 'audio',
+      key: key,
+      value: values[key],
+      snapshot: this.snapshotPending,
+      sourceTime: Date.now()
+    };
+    for (i = 0; i < this.listeners.length; i++) {
+      try { this.listeners[i](event); } catch (e) {}
+    }
+  }
+  this.snapshotPending = false;
+};
+
 var pictureState = new StateManager();
 var powerState = new StateManager();
 var applicationState = new StateManager();
+var audioState = new StateManager();
 var pictureSettings = new PictureSettingsGroup();
 pictureSettings.onState(function (event) {
   pictureState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
@@ -1006,6 +1062,10 @@ powerStateGroup.onState(function (event) {
 var applicationStateGroup = new ApplicationStateGroup();
 applicationStateGroup.onState(function (event) {
   applicationState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
+});
+var audioStateGroup = new AudioStateGroup();
+audioStateGroup.onState(function (event) {
+  audioState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
 });
 
 function NotificationGroup(handlers) {
@@ -1092,6 +1152,21 @@ function clearLunaPictureCache() {
  * for changes made by the remote or the TV menus. Use raw values so this path
  * has the same values as the picture settings subscription.
  */
+function reconcileAudioState(stats) {
+  var sound = stats && stats.audio_output !== undefined ? {
+    volume: stats.volume,
+    muted: stats.muted,
+    output: stats.audio_output
+  } : null;
+  var key;
+  if (!sound) return;
+  for (key in sound) {
+    if (sound[key] !== undefined && sound[key] !== null) {
+      audioState.update('audio', key, sound[key], true, stats.time);
+    }
+  }
+}
+
 function reconcileApplicationState(stats) {
   var app = stats && stats.app_id ? applicationStateValues(stats.app_id) : null;
   var key;
@@ -1953,6 +2028,7 @@ function collectStats(cb) {
 
   function flushStats(result) {
     clearTimeout(safetyTimeout);
+    reconcileAudioState(result);
     reconcileApplicationState(result);
     reconcilePowerState(result);
     reconcilePictureState(result);
@@ -4725,6 +4801,16 @@ function setupHomeAssistant() {
     for (var key in app) publishApplicationValue(key, app[key]);
   }
 
+  function publishAudioValue(key, value) {
+    if (typeof value === 'undefined' || value === null) return;
+    mqttClient.publish(pfx + '/state/audio/' + key, String(value), true);
+  }
+
+  function publishAudioSnapshot() {
+    var audio = audioState.snapshot().audio || {};
+    for (var key in audio) publishAudioValue(key, audio[key]);
+  }
+
   pictureState.onChange(function (event) {
     publishPictureValue(event.key, event.value);
   });
@@ -4736,9 +4822,13 @@ function setupHomeAssistant() {
   applicationState.onChange(function (event) {
     publishApplicationValue(event.key, event.value);
   });
+  audioState.onChange(function (event) {
+    publishAudioValue(event.key, event.value);
+  });
   pictureSettings.start();
   powerStateGroup.start();
   applicationStateGroup.start();
+  audioStateGroup.start();
   energySavingNotification.start();
 
   /*
@@ -5864,6 +5954,7 @@ function setupHomeAssistant() {
     publishPictureSnapshot();
     publishPowerSnapshot();
     publishApplicationSnapshot();
+    publishAudioSnapshot();
     // Deliberately not asserting a screen state here: publishTelemetry below
     // sets it from what the TV reports. Publishing a retained 'ON' on every
     // reconnect meant a restart silently flipped Home Assistant back to on.
