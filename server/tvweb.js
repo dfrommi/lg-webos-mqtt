@@ -3007,6 +3007,8 @@ var RCU_KEYS = {
 };
 
 var SLEEP_TIMER_VALUES = ['off', '10', '30', '60', '90', '120'];
+// Values returned by getSystemSettingValues for picture.energySaving.
+var ENERGY_SAVING_VALUES = ['auto', 'off', 'min', 'med', 'max', 'screen_off'];
 
 // What the settings service accepts for logoLuminanceAdjust, per
 // getSystemSettingValues on a B8. "strong" is the strongest, not an on/off.
@@ -3090,6 +3092,21 @@ function doControl(action, value, cb) {
           cb({ ok: !!(r && r.returnValue) });
         });
       });
+
+    case 'energySaving':
+      var energySaving = String(value || '').trim().toLowerCase();
+      if (ENERGY_SAVING_VALUES.indexOf(energySaving) === -1) {
+        return cb({ ok: false, error: 'energy saving must be one of ' + ENERGY_SAVING_VALUES.join(', ') });
+      }
+      return luna('com.webos.service.settings/setSystemSettings',
+                  {
+                    category: 'picture',
+                    settings: {
+                      energySaving: energySaving,
+                      energySavingModified: 'true'
+                    }
+                  },
+                  function (r) { cb({ ok: !!(r && r.returnValue) }); });
 
     case 'sound_output':
     case 'soundOutput':
@@ -4801,6 +4818,18 @@ function setupHomeAssistant() {
             ? lastPicModes.map(function (m) { return m.value; })
             : ['expert1', 'expert2', 'cinema', 'game', 'standard', 'eco', 'sports'],
           icon: 'mdi:image-filter-black-white'
+        }
+      },
+      {
+        type: 'select', id: 'energy_saving',
+        payload: {
+          name: 'Energy Saving Step',
+          command_topic: pfx + '/command/energySaving',
+          state_topic: telemetryTopic,
+          value_template: '{{ {"auto":"Auto", "off":"Off", "min":"Minimum", "med":"Medium", "max":"Maximum", "screen_off":"Screen off"}.get(value_json.picture.energySaving, "Unknown") if value_json.picture else "Unknown" }}',
+          command_template: '{{ {"Auto":"auto", "Off":"off", "Minimum":"min", "Medium":"med", "Maximum":"max", "Screen off":"screen_off"}[value] }}',
+          options: ['Auto', 'Off', 'Minimum', 'Medium', 'Maximum', 'Screen off'],
+          icon: 'mdi:brightness-auto'
         }
       },
       {
