@@ -26,6 +26,7 @@ var privacy = require('./lib/privacy');
 var oled = require('./lib/oled');
 var screensavers = require('./lib/screensavers');
 var telemetry = require('./lib/telemetry');
+var stateModule = require('./lib/state');
 var lunaTransport = require('./lib/luna');
 var luna = lunaTransport.call;
 var zeroBuffer = MiniMQTT.zeroBuffer;
@@ -395,6 +396,16 @@ telemetry.init({
   tvwebVersion: TVWEB_VERSION,
   mapPowerState: mapPowerState,
   isScreenSaver: isScreenSaver
+});
+
+var liveState = stateModule.init({
+  inputNameMap: telemetry.inputNameMap,
+  mapPowerState: mapPowerState,
+  formatSoundOutput: ha.formatSoundOutput,
+  clearCache: function () {
+    telemetry.clearCache();
+    clearLunaCache();
+  }
 });
 
 // ---------------------------------------------------------------- controls
@@ -1418,6 +1429,7 @@ function setupHomeAssistant() {
     if (!mqttClient.connected) return;
     mqttClient.publish(statusTopic, 'online', true);
     telemetry.collectStats(function(s) {
+      liveState.reconcile(s);
       mqttClient.publish(telemetryTopic, JSON.stringify(s), false);
       MQTT_STATUS.lastPublish = Date.now();
       /*
@@ -1617,6 +1629,7 @@ function setupHomeAssistant() {
   var intervalMs = CONFIG.mqtt.telemetryIntervalMs || 10000;
   setInterval(publishTelemetry, intervalMs);
 
+  liveState.start();
   mqttClient.connect();
 }
 
