@@ -127,7 +127,7 @@ function init(opts) {
   var inputNames = opts.inputNameMap || {};
   var clearCache = opts.clearCache || function () {};
   var groups = {};
-  var pictureKeys = ['backlight', 'pictureMode', 'screenShift', 'logoLuminanceAdjust'];
+  var pictureKeys = ['backlight', 'pictureMode', 'energySaving', 'screenShift', 'logoLuminanceAdjust'];
 
   groups.picture = new StateGroup('picture', new luna.Subscription(
     'com.webos.service.settings/getSystemSettings',
@@ -180,6 +180,7 @@ function init(opts) {
     if (picture) apply('picture', {
       pictureMode: picture.mode_raw,
       backlight: picture.backlight,
+      energySaving: picture.energySaving,
       screenShift: picture.screenShift,
       logoLuminanceAdjust: picture.logoLuminanceAdjust
     }, time);

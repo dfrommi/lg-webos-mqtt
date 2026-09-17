@@ -28,6 +28,7 @@ var screensavers = require('./lib/screensavers');
 var telemetry = require('./lib/telemetry');
 var stateModule = require('./lib/state');
 var mqttStateModule = require('./lib/mqtt-state');
+var notifications = require('./lib/notifications');
 var lunaTransport = require('./lib/luna');
 var luna = lunaTransport.call;
 var zeroBuffer = MiniMQTT.zeroBuffer;
@@ -409,6 +410,8 @@ var liveState = stateModule.init({
   }
 });
 
+var notificationState = notifications.init({ luna: luna });
+
 // ---------------------------------------------------------------- controls
 var INPUTS = ha.INPUTS;
 
@@ -432,9 +435,10 @@ var RCU_KEYS = {
   ok: 28,
   back: 412
 };
-
 var SLEEP_TIMER_VALUES = ['off', '10', '30', '60', '90', '120'];
+var ENERGY_SAVING_VALUES = ['auto', 'off', 'min', 'med', 'max', 'screen_off'];
 
+// What the dashboard reports
 // What the settings service accepts for logoLuminanceAdjust, per
 // getSystemSettingValues on a B8. "strong" is the strongest, not an on/off.
 var LOGO_DIMMING_VALUES = ['off', 'light', 'strong'];
@@ -517,6 +521,16 @@ function doControl(action, value, cb) {
           cb({ ok: !!(r && r.returnValue) });
         });
       });
+
+    case 'energySaving':
+      var energySaving = String(value || '').trim().toLowerCase();
+      if (ENERGY_SAVING_VALUES.indexOf(energySaving) === -1) {
+        return cb({ ok: false, error: 'energy saving must be one of ' + ENERGY_SAVING_VALUES.join(', ') });
+      }
+      return luna('com.webos.service.settings/setSystemSettings', {
+        category: 'picture',
+        settings: { energySaving: energySaving, energySavingModified: 'true' }
+      }, function (r) { cb({ ok: !!(r && r.returnValue) }); });
 
     case 'sound_output':
     case 'soundOutput':
@@ -1623,6 +1637,7 @@ function setupHomeAssistant() {
   setInterval(publishTelemetry, intervalMs);
 
   liveState.start();
+  notificationState.start();
   mqttClient.connect();
 }
 
