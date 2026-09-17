@@ -1534,6 +1534,23 @@ function pushTemp(t) {
   tempHistory.push(t);
   if (tempHistory.length > TEMP_HISTORY_MAX) tempHistory.shift();
 }
+/*
+ * Boot time, as an instant rather than a counter.
+ *
+ * uptime is floored to the second and the clock it is subtracted from moves in
+ * milliseconds, so recomputing this every publish would shift it by a second
+ * each time — a new Home Assistant state every 10s for a figure that changes
+ * only when the TV restarts. Republish only when the computed instant moves
+ * further than that jitter: 30s also absorbs the clock stepping when NTP lands,
+ * which on a cold boot is after the first telemetry has gone out.
+ */
+var bootEpoch = 0;
+function bootTime(uptimeSec) {
+  var computed = Date.now() - uptimeSec * 1000;
+  if (Math.abs(computed - bootEpoch) > 30000) bootEpoch = computed;
+  return new Date(bootEpoch).toISOString();
+}
+
 var lastStats = null;
 var lastStatsTime = 0;
 var isCollecting = false;
@@ -1606,6 +1623,7 @@ function collectStats(cb) {
     }
   }
   var peInfo = getPictureEngineInfo();
+  var uptimeSec = Math.floor(parseFloat(rd('/proc/uptime') || '0'));
 
   var out = {
     ok: true,
@@ -1665,7 +1683,8 @@ function collectStats(cb) {
     coresTotal: coreSlots.length,
     mem: { total: mi.MemTotal || 0, avail: mi.MemAvailable || 0 },
     swap: { total: mi.SwapTotal || 0, free: mi.SwapFree || 0, backing: swapBacking() },
-    uptime: Math.floor(parseFloat(rd('/proc/uptime') || '0')),
+    uptime: uptimeSec,
+    bootTime: bootTime(uptimeSec),
     loadavg: (rd('/proc/loadavg') || '').split(' ').slice(0, 3),
     wifi: wifi(),
     net: rate,
@@ -5123,11 +5142,10 @@ function setupHomeAssistant() {
         payload: {
           name: 'Uptime',
           state_topic: telemetryTopic,
-          value_template: '{{ value_json.uptime }}',
-          unit_of_measurement: 's',
-          device_class: 'duration',
-          suggested_display_precision: 0,
-          icon: 'mdi:clock-outline'
+          value_template: '{{ value_json.bootTime }}',
+          device_class: 'timestamp',
+          entity_category: 'diagnostic',
+          icon: 'mdi:clock-start'
         }
       },
       {
