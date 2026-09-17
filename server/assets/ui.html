@@ -439,6 +439,7 @@ button.pill[disabled]{cursor:default;opacity:.45}
 /* The raw flag name, kept visible on rows that now show a friendlier one: it is
    what the API, the TV and the issue tracker all call it. */
 .pv-row .k{color:var(--w35)}
+.pv-row .cnt{color:var(--w60);font-size:13px;font-weight:400}
 /* Collapsible privacy sections. The consent list alone runs to 21 rows, so the
    long sections fold. The summary keeps the pv-h size rather than borrowing the
    control column's small caps, so folding a section does not demote it. */
@@ -486,6 +487,15 @@ button.pill[disabled]{cursor:default;opacity:.45}
 .cfg-msg.bad{color:var(--warn,#e5534b)}
 .cfg-msg.good{color:var(--w100)}
 .cfg-toggles button[disabled].on{background:transparent;color:var(--w60);border-color:var(--w12);font-weight:400}
+.cfg-ent-chk{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:4px;
+  font-size:14px;color:var(--w90);min-width:0;user-select:none;cursor:pointer;transition:background .15s}
+.cfg-ent-chk:hover{background:var(--w06)}
+.cfg-ent-chk.dis{cursor:default;opacity:.45}
+.cfg-ent-chk.dis:hover{background:transparent}
+.cfg-ent-chk input[type="checkbox"]{width:16px;height:16px;margin:0;cursor:pointer;flex-shrink:0;accent-color:var(--w100)}
+.cfg-ent-chk.dis input[type="checkbox"]{cursor:default}
+.cfg-ent-chk .ent-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-ent-chk .ent-type{font-size:12px;color:var(--w60);margin-left:5px;font-weight:400}
 .proc{display:grid;grid-template-columns:1fr auto;gap:14px;padding:9px 0;
   border-bottom:1px solid var(--w06);font-size:14px}
 .proc .p-name{color:var(--w80);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1045,11 +1055,24 @@ footer{margin-top:38px;font-size:12px;letter-spacing:.10em;text-transform:upperc
     </div>
   </div>
 
+  <div class="pv-h">Home Assistant entities</div>
+  <div class="pv-sub">Choose which entity categories are published over MQTT Discovery.
+    Disabling an entity removes it cleanly from Home Assistant without leaving an orphaned state.</div>
+
+  <div class="pv-table" id="cfg-ents"></div>
+
+  <details class="pv-d" id="cfg-fine" style="margin-top:16px">
+    <summary>
+      <span>Fine-tune individual entities</span>
+      <span class="cur" id="cfg-fine-count">&mdash;</span>
+    </summary>
+    <div id="cfg-subents" style="padding:10px 0 20px"></div>
+  </details>
+
   <div class="cfg-save">
     <button id="cfg-save-btn" onclick="saveSettings()">Save &amp; restart</button>
     <span class="cfg-msg" id="cfg-msg">Saving restarts the server. The dashboard reconnects on its own.</span>
   </div>
-  <div class="sub" id="cfg-file" style="margin-top:14px"></div>
   </div>
   </div>
 </section>
@@ -2738,6 +2761,90 @@ function cfgMsg(text, kind) {
   el.className = 'cfg-msg' + (kind ? ' ' + kind : '');
 }
 
+let cfgEntities = { controls: true, oled: true, video: true, system: true, diagnostics: true, disabled: [] };
+let cfgCatalogue = [];
+let cfgCategories = [];
+
+function renderEntitiesUI() {
+  const container = q('cfg-ents');
+  if (!container || !cfgCategories.length) return;
+
+  const disabledSet = new Set(cfgEntities.disabled || []);
+  let totalActive = 0;
+  const totalEntities = cfgCatalogue.length;
+
+  let entsHtml = '';
+  for (const cat of cfgCategories) {
+    const catEnts = cfgCatalogue.filter(e => e.cat === cat.id);
+    const count = catEnts.length;
+    const catOn = cfgEntities[cat.id] !== false;
+    let activeInCat = 0;
+    if (catOn) {
+      for (const e of catEnts) {
+        if (!disabledSet.has(e.id) && !disabledSet.has(e.type + '.' + e.id)) activeInCat++;
+      }
+    }
+    totalActive += activeInCat;
+
+    entsHtml += `
+      <div class="pv-row">
+        <div>
+          <div class="n">${esc(cat.name)} <span class="cnt">(${count} ${count === 1 ? 'entity' : 'entities'})</span></div>
+          <div class="d">${esc(cat.desc)}</div>
+        </div>
+        <button type="button" class="pill ${catOn ? 'good' : 'idle'}" id="cfg-cat-${cat.id}" onclick="cfgToggleCat('${cat.id}')">
+          ${catOn ? 'Enabled' : 'Disabled'}
+        </button>
+      </div>`;
+  }
+  container.innerHTML = entsHtml;
+
+  const subContainer = q('cfg-subents');
+  if (subContainer) {
+    let subHtml = '';
+    for (const cat of cfgCategories) {
+      const catEnts = cfgCatalogue.filter(e => e.cat === cat.id);
+      if (!catEnts.length) continue;
+      const catOn = cfgEntities[cat.id] !== false;
+      subHtml += `<div class="pv-g" style="margin-top:16px"><span>${esc(cat.name)}</span></div>`;
+      subHtml += `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr));gap:4px 12px;margin-top:8px">`;
+      for (const e of catEnts) {
+        const isDis = disabledSet.has(e.id) || disabledSet.has(e.type + '.' + e.id);
+        const checked = catOn && !isDis;
+        subHtml += `
+          <label class="cfg-ent-chk${catOn ? '' : ' dis'}">
+            <input type="checkbox" id="cfg-ent-${e.id}" data-id="${esc(e.id)}" data-type="${esc(e.type)}" data-cat="${esc(cat.id)}" ${checked ? 'checked' : ''} ${catOn ? '' : 'disabled'} onchange="cfgToggleEnt(this)">
+            <span class="ent-name">${esc(e.name)} <span class="ent-type">${esc(e.type)}</span></span>
+          </label>`;
+      }
+      subHtml += `</div>`;
+    }
+    subContainer.innerHTML = subHtml;
+  }
+
+  const countEl = q('cfg-fine-count');
+  if (countEl) countEl.textContent = `${totalActive} of ${totalEntities} active`;
+}
+
+function cfgToggleCat(catId) {
+  cfgEntities[catId] = !(cfgEntities[catId] !== false);
+  renderEntitiesUI();
+}
+
+function cfgToggleEnt(cb) {
+  const id = cb.getAttribute('data-id');
+  const type = cb.getAttribute('data-type');
+  const dis = new Set(cfgEntities.disabled || []);
+  if (cb.checked) {
+    dis.delete(id);
+    dis.delete(type + '.' + id);
+  } else {
+    dis.add(id);
+  }
+  cfgEntities.disabled = Array.from(dis);
+  renderEntitiesUI();
+}
+
 async function loadSettings() {
   try {
     const r = await fetch(api('/api/settings'));
@@ -2763,7 +2870,10 @@ async function loadSettings() {
     q('cfg-tls').classList.toggle('on', m.tls);
     q('cfg-verify').classList.toggle('on', m.tlsRejectUnauthorized);
     cfgSyncTls();
-    q('cfg-file').textContent = 'Saved to ' + j.configFile + ' on the TV.';
+    if (m.entities) cfgEntities = m.entities;
+    if (m.categories) cfgCategories = m.categories;
+    if (m.entityCatalogue) cfgCatalogue = m.entityCatalogue;
+    renderEntitiesUI();
     q('cfg-save-btn').disabled = !j.writable;
     cfgMsg(j.writable
       ? 'Saving restarts the server. The dashboard reconnects on its own.'
@@ -2782,7 +2892,15 @@ async function saveSettings() {
       username: q('cfg-user').value,
       topicPrefix: q('cfg-prefix').value,
       discoveryPrefix: q('cfg-disc').value,
-      telemetryIntervalMs: q('cfg-interval').value || 10000
+      telemetryIntervalMs: q('cfg-interval').value || 10000,
+      entities: {
+        controls: cfgEntities.controls !== false,
+        oled: cfgEntities.oled !== false,
+        video: cfgEntities.video !== false,
+        system: cfgEntities.system !== false,
+        diagnostics: cfgEntities.diagnostics !== false,
+        disabled: cfgEntities.disabled || []
+      }
     },
     device: { id: q('cfg-devid').value, name: q('cfg-devname').value }
   };
