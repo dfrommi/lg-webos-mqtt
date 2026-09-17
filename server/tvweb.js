@@ -865,11 +865,6 @@ StateManager.prototype.update = function (group, key, value, snapshot, sourceTim
   return true;
 };
 
-StateManager.prototype.get = function (group, key) {
-  var groupValues = this.values[group];
-  return groupValues && Object.prototype.hasOwnProperty.call(groupValues, key) ? groupValues[key] : undefined;
-};
-
 StateManager.prototype.snapshot = function () {
   var result = {}, group, key;
   for (group in this.values) {
@@ -879,10 +874,77 @@ StateManager.prototype.snapshot = function () {
   return result;
 };
 
+function PowerStateGroup() {
+  var self = this;
+  this.listeners = [];
+  this.snapshotPending = true;
+  this.subscription = new LunaSubscription(
+    'com.webos.service.tvpower/power/getPowerState',
+    { subscribe: true },
+    null,
+    {
+      message: function (response) { self._message(response); },
+      close: function () { self.snapshotPending = true; }
+    }
+  );
+}
+
+PowerStateGroup.prototype.onState = function (listener) {
+  if (typeof listener === 'function') this.listeners.push(listener);
+  return this;
+};
+
+PowerStateGroup.prototype.start = function () {
+  this.subscription.start();
+  return this;
+};
+
+PowerStateGroup.prototype._message = function (response) {
+  var mapped, event, i;
+  if (!response || response.returnValue === false || typeof response.state === 'undefined') return;
+  mapped = mapPowerState(response.state);
+  event = {
+    group: 'power',
+    key: 'state',
+    value: mapped.raw,
+    snapshot: this.snapshotPending,
+    sourceTime: Date.now()
+  };
+  for (i = 0; i < this.listeners.length; i++) {
+    try { this.listeners[i](event); } catch (e) {}
+  }
+  event = {
+    group: 'power',
+    key: 'screenOn',
+    value: mapped.screenOn,
+    snapshot: this.snapshotPending,
+    sourceTime: Date.now()
+  };
+  for (i = 0; i < this.listeners.length; i++) {
+    try { this.listeners[i](event); } catch (e2) {}
+  }
+  event = {
+    group: 'power',
+    key: 'systemOn',
+    value: mapped.systemOn,
+    snapshot: this.snapshotPending,
+    sourceTime: Date.now()
+  };
+  for (i = 0; i < this.listeners.length; i++) {
+    try { this.listeners[i](event); } catch (e3) {}
+  }
+  this.snapshotPending = false;
+};
+
 var pictureState = new StateManager();
+var powerState = new StateManager();
 var pictureSettings = new PictureSettingsGroup();
 pictureSettings.onState(function (event) {
   pictureState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
+});
+var powerStateGroup = new PowerStateGroup();
+powerStateGroup.onState(function (event) {
+  powerState.update(event.group, event.key, event.value, event.snapshot, event.sourceTime);
 });
 
 function NotificationGroup(handlers) {
@@ -962,6 +1024,16 @@ function clearLunaPictureCache() {
  * for changes made by the remote or the TV menus. Use raw values so this path
  * has the same values as the picture settings subscription.
  */
+function reconcilePowerState(stats) {
+  var power = stats && stats.powerState;
+  var mapped;
+  if (!power) return;
+  mapped = mapPowerState(power.raw);
+  powerState.update('power', 'state', mapped.raw, true, stats.time);
+  powerState.update('power', 'screenOn', mapped.screenOn, true, stats.time);
+  powerState.update('power', 'systemOn', mapped.systemOn, true, stats.time);
+}
+
 function reconcilePictureState(stats) {
   var picture = stats && stats.picture;
   if (!picture) return;
@@ -1806,6 +1878,7 @@ function collectStats(cb) {
 
   function flushStats(result) {
     clearTimeout(safetyTimeout);
+    reconcilePowerState(result);
     reconcilePictureState(result);
     lastStats = result;
     lastStatsTime = Date.now();
@@ -4559,10 +4632,23 @@ function setupHomeAssistant() {
     for (var key in picture) publishPictureValue(key, picture[key]);
   }
 
+  function publishPowerSnapshot() {
+    var power = powerState.snapshot().power || {};
+    if (typeof power.screenOn === 'boolean') {
+      mqttClient.publish(stateScreenTopic, power.screenOn ? 'ON' : 'OFF', true);
+    }
+  }
+
   pictureState.onChange(function (event) {
     publishPictureValue(event.key, event.value);
   });
+  powerState.onChange(function (event) {
+    if (event.key === 'screenOn') {
+      mqttClient.publish(stateScreenTopic, event.value ? 'ON' : 'OFF', true);
+    }
+  });
   pictureSettings.start();
+  powerStateGroup.start();
   energySavingNotification.start();
 
   /*
@@ -5686,6 +5772,7 @@ function setupHomeAssistant() {
                 (useTls ? ' (tls)' : ' (plaintext)'));
     mqttClient.publish(statusTopic, 'online', true);
     publishPictureSnapshot();
+    publishPowerSnapshot();
     // Deliberately not asserting a screen state here: publishTelemetry below
     // sets it from what the TV reports. Publishing a retained 'ON' on every
     // reconnect meant a restart silently flipped Home Assistant back to on.
