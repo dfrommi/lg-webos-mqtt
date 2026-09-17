@@ -2,7 +2,7 @@
 
 A server that runs **on** a rooted LG webOS TV. It serves a live dashboard to
 any browser on the network, and will optionally bridge the TV into Home
-Assistant over MQTT as a single auto-discovered device with up to 69 entities.
+Assistant over MQTT as a single auto-discovered device with up to 70 entities.
 
 The dashboard needs nothing but the TV. Home Assistant control over MQTT is
 optional, and set up in [step 4](#4-home-assistant--mqtt-optional).
@@ -25,7 +25,7 @@ There are no dependencies. This is ES5 on the Node 0.12 runtime that is on the T
 3. **Replacing the screen saver.** A clock, a starfield, fireworks, or the
    TV's own readings, each dim or bright, in place of LG's.
 
-4. **Integrating the TV into Home Assistant.** Optional, over MQTT: up to 69
+4. **Integrating the TV into Home Assistant.** Optional, over MQTT: up to 70
    entities arrive as a single auto-discovered device &mdash; no YAML, no LG
    account &mdash; so the TV can be automated and its telemetry recorded
    alongside everything else in the house.
@@ -60,7 +60,7 @@ There are no dependencies. This is ES5 on the Node 0.12 runtime that is on the T
 
 ## Home Assistant (auto-discovered device via MQTT)
 
-Up to 69 native entities arrive over MQTT Discovery as a single unified device
+Up to 70 native entities arrive over MQTT Discovery as a single unified device
 <p align="center">
   <a href="https://github.com/user-attachments/assets/1d76b1a2-68d9-42a4-a497-b107d706b235"><img width="800" alt="Home Assistant MQTT entities" src="https://github.com/user-attachments/assets/1d76b1a2-68d9-42a4-a497-b107d706b235" /></a>
 </p>
@@ -232,6 +232,7 @@ versions and panel types.
 | OLED55G42LW | 24 | 33.31.68 | OLED | Rooted with slopbro, not the Homebrew Channel |
 | OLED42C24LA | 9.2.2 (22+) | 23.25.55 | OLED | Rooted with jsbro-autoroot |
 | OLED65B7V-Z | 3.9.3 | 06.10.65 | OLED | No SoC temperature or eMMC wear readings |
+| OLED55B46LA | 24 (9.24.8) | 23.23.30 | OLED | Installed over telnet; no logo light on this model |
 
 **If you run it on anything else, please open an issue whether it's working or not**
 Include your model, webOS version and
@@ -471,7 +472,7 @@ Full detail, including the MQTT ACL guidance and optional TLS, is in
 ## Documentation
 
 * [docs/SECURITY.md](docs/SECURITY.md) &mdash; threat model, SSH migration, MQTT hardening
-* [docs/HOME-ASSISTANT.md](docs/HOME-ASSISTANT.md) &mdash; up to 69 entities, universal media player, example automations
+* [docs/HOME-ASSISTANT.md](docs/HOME-ASSISTANT.md) &mdash; up to 70 entities, universal media player, example automations
 * [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) &mdash; architecture, `/proc/lg` reference, platform quirks
 
 ---
