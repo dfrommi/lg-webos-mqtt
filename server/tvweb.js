@@ -4784,11 +4784,17 @@ function setupHomeAssistant() {
     for (var key in picture) publishPictureValue(key, picture[key]);
   }
 
+  function publishPowerValue(key, value) {
+    if (typeof value === 'undefined' || value === null) return;
+    mqttClient.publish(pfx + '/state/power/' + key, String(value), true);
+    if (key === 'screenOn') {
+      mqttClient.publish(stateScreenTopic, value ? 'ON' : 'OFF', true);
+    }
+  }
+
   function publishPowerSnapshot() {
     var power = powerState.snapshot().power || {};
-    if (typeof power.screenOn === 'boolean') {
-      mqttClient.publish(stateScreenTopic, power.screenOn ? 'ON' : 'OFF', true);
-    }
+    for (var key in power) publishPowerValue(key, power[key]);
   }
 
   function publishApplicationValue(key, value) {
@@ -4815,9 +4821,7 @@ function setupHomeAssistant() {
     publishPictureValue(event.key, event.value);
   });
   powerState.onChange(function (event) {
-    if (event.key === 'screenOn') {
-      mqttClient.publish(stateScreenTopic, event.value ? 'ON' : 'OFF', true);
-    }
+    publishPowerValue(event.key, event.value);
   });
   applicationState.onChange(function (event) {
     publishApplicationValue(event.key, event.value);
